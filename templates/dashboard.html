@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PEL Fuel Dashboard </title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- DataTables CSS -->
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.11.5/css/jquery.dataTables.min.css">
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.min.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f8f9fa;
+            margin: 0;
+            padding: 10px;
+        }
+
+        .container-fluid {
+            max-width: 1300px;
+            margin: auto;
+            padding: 15px;
+        }
+
+        .summary {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .card {
+            flex: 1;
+            padding: 15px;
+            border-radius: 5px;
+            background-color: #ffffff;
+            text-align: center;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .nav-tabs .nav-link {
+            color: #007bff;
+            font-weight: bold;
+        }
+
+        .nav-tabs .nav-link.active {
+            background-color: #007bff;
+            color: white;
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .clear-btn {
+            background-color: red;
+            color: white;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container-fluid">
+        <h1 class="text-center">PEL Fuel Dashboard</h1>
+
+        <!-- Summary Cards -->
+        <div class="summary d-flex justify-content-between">
+            <div class="card">
+                <h3>Total Quantity</h3>
+                <p>{{ summary["Total Quantity"] }} Liters</p>
+            </div>
+            <div class="card">
+                <h3>Total Amount</h3>
+                <p>KES {{ summary["Total Revenue (KES)"] }}</p>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <ul class="nav nav-tabs mt-3" id="dashboardTabs">
+            <li class="nav-item">
+                <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#chart1">Fuel per Department</button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#chart2">Amount fueled per Department</button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link" data-bs-toggle="tab" data-bs-target="#table">Transactions Table</button>
+            </li>
+        </ul>
+
+        <div class="tab-content mt-3">
+            <!-- Chart 1: Fuel Quantity -->
+            <div class="tab-pane fade show active" id="chart1">
+                <!-- Filters -->
+                <form method="POST" id="filter-form" class="search-form row g-3">
+                    <div class="col-md-3">
+                        <label>Vehicle Registration:</label>
+                        <input type="text" name="vehicle_reg" class="form-control" value="{{ filters.vehicle_reg }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>Department:</label>
+                        <input type="text" name="department" class="form-control" value="{{ filters.department }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>Service Station:</label>
+                        <input type="text" name="service_station" class="form-control"
+                            value="{{ filters.service_station }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>Start Date:</label>
+                        <input type="date" name="start_date" class="form-control" value="{{ filters.start_date }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>End Date:</label>
+                        <input type="date" name="end_date" class="form-control" value="{{ filters.end_date }}">
+                    </div>
+
+                    <div class="col-md-3 d-flex align-items-end">
+                        <button type="submit" class="btn btn-primary w-100">Filter</button>
+                        <button type="button" id="clear-filters" class="btn clear-btn w-100 ms-2">Clear</button>
+                    </div>
+                </form>
+
+                <!-- Download Button -->
+                <div class="text-end mt-3">
+                    <a id="download-excel" class="btn btn-success" href="#">Download Excel</a>
+                </div>
+
+
+
+                <h2>Fuel Quantity Per Department</h2>
+                <img src="{{ url_for('static', filename='charts/fuel_quantity_chart.png') }}" alt="Fuel Quantity Chart">
+            </div>
+
+            <!-- Chart 2: Total Revenue -->
+            <div class="tab-pane fade" id="chart2">
+                <!-- Filters -->
+                <form method="POST" id="filter-form" class="search-form row g-3">
+                    <div class="col-md-3">
+                        <label>Vehicle Registration:</label>
+                        <input type="text" name="vehicle_reg" class="form-control" value="{{ filters.vehicle_reg }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>Department:</label>
+                        <input type="text" name="department" class="form-control" value="{{ filters.department }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>Service Station:</label>
+                        <input type="text" name="service_station" class="form-control"
+                            value="{{ filters.service_station }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>Start Date:</label>
+                        <input type="date" name="start_date" class="form-control" value="{{ filters.start_date }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label>End Date:</label>
+                        <input type="date" name="end_date" class="form-control" value="{{ filters.end_date }}">
+                    </div>
+
+                    <div class="col-md-3 d-flex align-items-end">
+                        <button type="submit" class="btn btn-primary w-100">Filter</button>
+                        <button type="button" id="clear-filters" class="btn clear-btn w-100 ms-2">Clear</button>
+                    </div>
+                </form>
+
+                <!-- Download Button -->
+                <div class="text-end mt-3">
+                    <a id="download-excel" class="btn btn-success" href="#">Download Excel</a>
+                </div>
+
+                <h2>Amount fueled per Department</h2>
+                <img src="{{ url_for('static', filename='charts/revenue_chart.png') }}" alt="Revenue Chart">
+            </div>
+
+            <!-- Transactions Table -->
+            <div class="tab-pane fade" id="table">
+                <!-- Filters -->
+                <form method="POST" class="search-form row g-3" id="filter-form-table">
+                    <div class="col-md-4">
+                        <label>Vehicle Registration:</label>
+                        <input type="text" name="vehicle_reg" class="form-control">
+                    </div>
+
+                    <div class="col-md-4">
+                        <label>Department:</label>
+                        <input type="text" name="department" class="form-control">
+                    </div>
+
+                    <div class="col-md-4">
+                        <label>Service Station:</label>
+                        <input type="text" name="service_station" class="form-control">
+                    </div>
+
+                    <div class="col-md-4">
+                        <label>Start Date:</label>
+                        <input type="date" name="start_date" class="form-control">
+                    </div>
+
+                    <div class="col-md-4">
+                        <label>End Date:</label>
+                        <input type="date" name="end_date" class="form-control">
+                    </div>
+
+                    <div class="col-md-4 d-flex align-items-end">
+                        <button type="submit" class="btn btn-primary w-100">Filter</button>
+                        <button type="button" class="btn clear-btn w-100 ms-2"
+                            onclick="clearFilters('filter-form-table')">Clear</button>
+                    </div>
+                </form>
+
+                <h2>Transactions</h2>
+                <div class="table-container">
+                    <table id="transactions" class="table table-striped table-bordered">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Date</th>
+                                <th>Time</th>
+                                <th>Vehicle Registration</th>
+                                <th>Department</th>
+                                <th>Service Station</th>
+                                <th>Product</th>
+                                <th>Quantity (Liters)</th>
+                                <th>Price per Liter</th>
+                                <th>Total Cost (KES)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in data %}
+                            <tr>
+                                <td>{{ row["date"] }}</td>
+                                <td>{{ row["time"] }}</td>
+                                <td>{{ row["vehicle_registration"] }}</td>
+                                <td>{{ row["department"] }}</td>
+                                <td>{{ row["service_station"] }}</td>
+                                <td>{{ row["product"] }}</td>
+                                <td>{{ row["quantity"] }}</td>
+                                <td>{{ row["terminal_price"] }}</td>
+                                <td>{{ row["customer_amount"] }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        $(document).ready(function () {
+            $('#transactions').DataTable({
+                "paging": true,
+                "pageLength": 10,
+                "ordering": true,
+                "searching": true
+            });
+
+            // Function to update download link with current filters
+            function updateDownloadLink() {
+                let params = new URLSearchParams(new FormData(document.getElementById("filter-form")));
+                $("#download-excel").attr("href", "/export?" + params.toString());
+            }
+
+            // Clear filters and refetch data
+            $("#clear-filters").click(function () {
+                $("#filter-form")[0].reset();  // Reset form
+                $("#filter-form input").val(""); // Clear any values set manually
+                updateDownloadLink();  // Update download link to remove filters
+
+                // Submit the form with empty values to refetch all data
+                $.post("/", $("#filter-form").serialize(), function (data) {
+                    $("body").html(data);  // Replace the entire page content with the new data
+                });
+            });
+
+            // Update download link when form inputs change
+            $("#filter-form input").on("input", updateDownloadLink);
+            updateDownloadLink();  // Set initial link on page load
+        });
+    </script>
+
+
+</body>
+
+</html>

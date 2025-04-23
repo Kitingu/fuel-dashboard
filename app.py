@@ -6,16 +6,30 @@ import seaborn as sns
 import os
 from sqlalchemy import create_engine, text
 from io import BytesIO
+from dotenv import load_dotenv
 
 # 🔹 Fix Matplotlib error
 matplotlib.use("Agg")
 
+# 🔹 Load environment variables from .env fil
+load_dotenv()
 # Flask App
 app = Flask(__name__)
 
 # 🔹 Use SQLAlchemy for PostgreSQL connection
-DB_CONFIG = "postgresql://postgres:postgres@localhost:5432/ingestion_db"
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASS")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_NAME = os.getenv("DB_NAME")
+
+print("Loaded DB config:")
+print(f"{DB_USER=}, {DB_PASS=}, {DB_HOST=}, {DB_PORT=}, {DB_NAME=}")
+
+DB_CONFIG = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 engine = create_engine(DB_CONFIG)
+# DB_CONFIG = "postgresql://postgres:postgres@localhost:5432/ingestion_db"
+# engine = create_engine(DB_CONFIG)
 
 # Function to Fetch Data with Filters
 def get_fuel_data(vehicle_reg=None, department=None, service_station=None, start_date=None, end_date=None):

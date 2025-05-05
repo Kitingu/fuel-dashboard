@@ -1,11 +1,10 @@
 import pandas as pd
-import psycopg2
+import pyodbc
 import numpy as np
 import os
 from dotenv import load_dotenv
-# PostgreSQL Configuration
 
-
+# SQL Server Configuration
 load_dotenv()
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
@@ -13,121 +12,167 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
 
-DB_CONFIG = {
-    "dbname": DB_NAME,
-    "user": DB_USER,
-    "password": DB_PASS,
-    "host": DB_HOST,
-    "port": DB_PORT
-}
+# SQL Server connection string
+CONN_STRING = (
+    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+    f"SERVER={DB_HOST},{DB_PORT};"
+    f"DATABASE={DB_NAME};"
+    f"UID={DB_USER};"
+    f"PWD={DB_PASS};"
+    "Connection Timeout=30;"
+    "Login Timeout=15;"
+)
 
-# Path to Excel File
-EXCEL_FILE = "main.xlsx"  # Change this if needed
+try:
+    # Connect to SQL Server
+    conn = pyodbc.connect(CONN_STRING)
+    cursor = conn.cursor()
+    print("✅ Successfully connected to SQL Server")
 
-# Read Excel Data
-df = pd.read_excel(EXCEL_FILE)
+    # Path to Excel File
+    EXCEL_FILE = "main.xlsx"  # Change this if needed
 
-# 🔹 Normalize column names
-df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace("(", "").str.replace(")", "")
+    # Read Excel Data
+    df = pd.read_excel(EXCEL_FILE)
 
-# 🔹 Rename columns correctly
-column_mapping = {
-    "date": "date",
-    "time": "time",
-    "vehicle_registration_number": "vehicle_registration",
-    "department": "department",
-    "truck_model": "truck_model",
-    "service_provider": "service_provider",
-    "service_station_name": "service_station",
-    "product/service": "product",
-    "quantity": "quantity",
-    "full_tank_capacity": "full_tank_capacity",
-    "terminal_price": "terminal_price",
-    "customer_amount": "customer_amount"
-}
-df = df.rename(columns=column_mapping)
+    # Normalize column names
+    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace("(", "").str.replace(")", "")
 
-# 🔹 Ensure required columns exist
-missing_columns = [col for col in column_mapping.values() if col not in df.columns]
-if missing_columns:
-    raise ValueError(f"Missing Columns in DataFrame: {missing_columns}")
+    # Rename columns correctly
+    column_mapping = {
+        "date": "date",
+        "time": "time",
+        "vehicle_registration_number": "vehicle_registration",
+        "department": "department",
+        "truck_model": "truck_model",
+        "service_provider": "service_provider",
+        "service_station_name": "service_station",
+        "product/service": "product",
+        "quantity": "quantity",
+        "full_tank_capacity": "full_tank_capacity",
+        "terminal_price": "terminal_price",
+        "customer_amount": "customer_amount",
+        "region": "region"
+    }
+    df = df.rename(columns=column_mapping)
 
-# 🔹 Convert date & time formats
-df["date"] = pd.to_datetime(df["date"], format="%m/%d/%Y", errors="coerce").dt.date
-df["time"] = pd.to_datetime(df["time"], format="%H:%M:%S", errors="coerce").dt.time
+    # Ensure required columns exist
+    missing_columns = [col for col in column_mapping.values() if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing Columns in DataFrame: {missing_columns}")
 
-# 🔹 Replace `NaT` with `None` (NULL in PostgreSQL)
-df["date"] = df["date"].where(pd.notna(df["date"]), None)
-df["time"] = df["time"].where(pd.notna(df["time"]), None)
+    # Convert date & time formats
+    df["date"] = pd.to_datetime(df["date"], format="%m/%d/%Y", errors="coerce").dt.date
+    df["time"] = pd.to_datetime(df["time"], format="%H:%M:%S", errors="coerce").dt.time
 
-# 🔹 Convert numeric columns, replacing invalid values with None
-numeric_columns = ["quantity", "full_tank_capacity", "terminal_price", "customer_amount"]
+    # Replace `NaT` with `None` (NULL in SQL Server)
+    df["date"] = df["date"].where(pd.notna(df["date"]), None)
+    df["time"] = df["time"].where(pd.notna(df["time"]), None)
 
-for col in numeric_columns:
-    df[col] = pd.to_numeric(df[col], errors="coerce")  # Convert invalid numbers to NaN
-    df[col] = df[col].replace({np.nan: None})  # Convert NaN to None for PostgreSQL
+    # Convert numeric columns, replacing invalid values with None
+    numeric_columns = ["quantity", "full_tank_capacity", "terminal_price", "customer_amount"]
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")  # Convert invalid numbers to NaN
+        df[col] = df[col].replace({np.nan: None})  # Convert NaN to None for SQL Server
 
-# 🔹 Connect to PostgreSQL
-conn = psycopg2.connect(**DB_CONFIG)
-cursor = conn.cursor()
+    # Create Table with Indexes
+    create_table_query = """
+    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='fuel_transactions' AND xtype='U')
+    CREATE TABLE fuel_transactions (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        date DATE,
+        time TIME,
+        vehicle_registration NVARCHAR(255),
+        department NVARCHAR(255),
+        truck_model NVARCHAR(255),
+        service_provider NVARCHAR(255),
+        service_station NVARCHAR(255),
+        product NVARCHAR(255),
+        quantity FLOAT,
+        full_tank_capacity FLOAT,
+        terminal_price FLOAT,
+        customer_amount FLOAT,
+        region NVARCHAR(255)
+    );
+    """
+    cursor.execute(create_table_query)
 
-# 🔹 Create Table with Indexes
-create_table_query = """
-CREATE TABLE IF NOT EXISTS fuel_transactions (
-    id SERIAL PRIMARY KEY,
-    date DATE,
-    time TIME,
-    vehicle_registration TEXT,
-    department TEXT,
-    truck_model TEXT,
-    service_provider TEXT,
-    service_station TEXT,
-    product TEXT,
-    quantity REAL,
-    full_tank_capacity REAL,
-    terminal_price REAL,
-    customer_amount REAL
-);
-"""
-cursor.execute(create_table_query)
+    # Add Indexes for Faster Searching
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_vehicle_reg' AND object_id = OBJECT_ID('fuel_transactions'))
+    CREATE INDEX idx_vehicle_reg ON fuel_transactions(vehicle_registration);
+    """)
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_department' AND object_id = OBJECT_ID('fuel_transactions'))
+    CREATE INDEX idx_department ON fuel_transactions(department);
+    """)
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_service_station' AND object_id = OBJECT_ID('fuel_transactions'))
+    CREATE INDEX idx_service_station ON fuel_transactions(service_station);
+    """)
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_date' AND object_id = OBJECT_ID('fuel_transactions'))
+    CREATE INDEX idx_date ON fuel_transactions(date);
+    """)
 
-# 🔹 Add Indexes for Faster Searching
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_reg ON fuel_transactions(vehicle_registration);")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_department ON fuel_transactions(department);")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_service_station ON fuel_transactions(service_station);")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_date ON fuel_transactions(date);")
+    conn.commit()
 
-conn.commit()
+    # Insert Data
+    insert_query = """
+    INSERT INTO fuel_transactions 
+    (date, time, vehicle_registration, department, truck_model, service_provider, 
+     service_station, product, quantity, full_tank_capacity, terminal_price, customer_amount, region) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """
 
-# 🔹 Insert Data
-insert_query = """
-INSERT INTO fuel_transactions 
-(date, time, vehicle_registration, department, truck_model, service_provider, service_station, product, quantity, full_tank_capacity, terminal_price, customer_amount) 
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-"""
+    # Insert each row safely
+    total_rows = len(df)
+    for i, (_, row) in enumerate(df.iterrows(), 1):
+        try:
+            values = (
+                row["date"],
+                row["time"],
+                row["vehicle_registration"],
+                row["department"],
+                row["truck_model"],
+                row["service_provider"],
+                row["service_station"],
+                row["product"],
+                row["quantity"],
+                row["full_tank_capacity"],
+                row["terminal_price"],
+                row["customer_amount"],
+                row["region"]
+            )
+            cursor.execute(insert_query, values)
+            
+            # Commit every 100 rows to avoid memory issues
+            if i % 100 == 0:
+                conn.commit()
+                print(f"✅ Processed {i}/{total_rows} rows")
+                
+        except Exception as e:
+            print(f"❌ Error inserting row {i}: {e}")
+            print(f"Problematic row data: {row.to_dict()}")
+            conn.rollback()
+            continue
 
-# 🔹 Insert each row safely
-for _, row in df.iterrows():
-    values = (
-        row["date"],
-        row["time"],  # 🔹 `NaT` will be replaced with `None`
-        row["vehicle_registration"],
-        row["department"],
-        row["truck_model"],
-        row["service_provider"],
-        row["service_station"],
-        row["product"],
-        row["quantity"],
-        row["full_tank_capacity"],
-        row["terminal_price"],
-        row["customer_amount"]
-    )
-    cursor.execute(insert_query, values)
+    conn.commit()
+    print(f"✅ Successfully inserted {total_rows} rows into SQL Server")
 
-conn.commit()
-
-print("✅ Data inserted successfully.")
-
-# 🔹 Close Connection
-cursor.close()
-conn.close()
+except pyodbc.OperationalError as e:
+    print(f"❌ Connection failed: {e}")
+    print("Troubleshooting steps:")
+    print("1. Verify SQL Server is running and accessible")
+    print("2. Check network connectivity (can you ping the server?)")
+    print("3. Ensure port 1433 (or your custom port) is open")
+    print("4. Verify credentials in your .env file")
+    print("5. Check SQL Server error logs for more details")
+except Exception as e:
+    print(f"❌ An unexpected error occurred: {e}")
+finally:
+    if 'cursor' in locals():
+        cursor.close()
+    if 'conn' in locals():
+        conn.close()
+    print("✅ Database connection closed")

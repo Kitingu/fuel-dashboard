@@ -1,3 +1,1 @@
-from app import app  # change to your module
-if __name__ == "__main__":
-    app.run()
+from _app import app as application

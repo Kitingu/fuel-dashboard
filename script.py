@@ -2,21 +2,22 @@ import pandas as pd
 import pyodbc
 import os
 from dotenv import load_dotenv
-from time import sleep, time
+from time import time
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import decimal
 import numpy as np
 import warnings
+import re
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
 # Configuration
 load_dotenv()
-CHUNK_SIZE = 300  # Optimal balance between speed and reliability
+CHUNK_SIZE = 400
 RETRY_ATTEMPTS = 5
-MAX_STRING_LENGTH = 255  # Maximum length for string fields
-MAX_DECIMAL_PRECISION = 10  # Maximum precision for decimal values
+MAX_STRING_LENGTH = 255
+MAX_DECIMAL_PRECISION = 10
 
 DB_CONFIG = {
     'driver': os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server"),
@@ -47,40 +48,38 @@ def get_connection_string(config):
     retry=retry_if_exception_type((pyodbc.OperationalError, pyodbc.InterfaceError, pyodbc.Error))
 )
 def connect_to_sql():
+    print("⏳ Connecting to SQL Server...")
     conn_str = get_connection_string(DB_CONFIG)
     return pyodbc.connect(conn_str)
 
 def validate_and_convert_value(value, col_type):
-    """Validate and convert values based on their expected type"""
     if pd.isna(value) or value is None:
         return None
     
     try:
         if col_type == 'string':
-            # Truncate strings to maximum allowed length
             str_val = str(value).strip()[:MAX_STRING_LENGTH]
             return str_val if str_val else None
         elif col_type == 'decimal':
-            # Handle decimal conversion with proper precision
             str_val = f"{float(value):.{MAX_DECIMAL_PRECISION-2}f}"
             return decimal.Decimal(str_val).quantize(
-                decimal.Decimal(f"1.{'0' * (MAX_DECIMAL_PRECISION-2)}"), 
+                decimal.Decimal(f"1.{'0' * (MAX_DECIMAL_PRECISION-2)}"),
                 rounding=decimal.ROUND_HALF_UP
             )
         elif col_type == 'date':
-            return pd.to_datetime(value, errors='coerce').date() if pd.notna(value) else None
+            dt = pd.to_datetime(value, errors='coerce')
+            return dt.date() if pd.notna(dt) else None
         elif col_type == 'time':
-            return pd.to_datetime(value, errors='coerce').time() if pd.notna(value) else None
+            dt = pd.to_datetime(value, errors='coerce')
+            return dt.time() if pd.notna(dt) else None
         else:
             return str(value)[:MAX_STRING_LENGTH] if value else None
     except (ValueError, TypeError, decimal.InvalidOperation):
         return None
 
 def prepare_data(df):
-    # Clean column names
     df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_").str.replace(r"[()]", "", regex=True)
     
-    # Standardize column names and types
     column_specs = {
         "date": ("date", 'date'),
         "time": ("time", 'time'),
@@ -97,11 +96,21 @@ def prepare_data(df):
         "region": ("region", 'string')
     }
     
-    # Apply column renaming and type conversion
     processed_df = pd.DataFrame()
     for old_name, (new_name, col_type) in column_specs.items():
         if old_name in df.columns:
             processed_df[new_name] = df[old_name].apply(lambda x: validate_and_convert_value(x, col_type))
+        else:
+            print(f"⚠️ Column '{old_name}' not found in DataFrame")
+    
+    # Data quality checks
+    if 'department' in processed_df.columns:
+        null_depts = processed_df['department'].isna().sum()
+        if null_depts > 0:
+            print(f"⚠️ Warning: {null_depts} null department values after processing")
+        empty_depts = processed_df['department'].apply(lambda x: x is not None and str(x).strip() == '').sum()
+        if empty_depts > 0:
+            print(f"⚠️ Warning: {empty_depts} empty department strings after processing")
     
     return processed_df.replace({np.nan: None})
 
@@ -116,7 +125,8 @@ def create_tables(cursor, conn):
     IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='service_stations' AND xtype='U')
         CREATE TABLE service_stations (
             id INT IDENTITY(1,1) PRIMARY KEY,
-            name NVARCHAR(255) UNIQUE NOT NULL
+            name NVARCHAR(255) UNIQUE NOT NULL,
+            region NVARCHAR(255)
         );
     
     IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='fuel_transactions' AND xtype='U')
@@ -138,7 +148,6 @@ def create_tables(cursor, conn):
         );
     """)
 
-    # Create indexes
     indexes = [
         ('idx_vehicle_reg', 'vehicle_registration'),
         ('idx_department_id', 'department_id'),
@@ -159,195 +168,308 @@ def create_tables(cursor, conn):
     conn.commit()
     print("✅ Tables and indexes created successfully")
 
-def get_or_create_name_ids_bulk(cursor, names, table):
-    """Optimized bulk lookup and insert for names with duplicate handling"""
-    if not names or all(name is None for name in names):
-        return {}
-
-    # Clean and get unique non-null names (case-insensitive, trimmed)
-    clean_names = {str(name).strip() for name in names if name is not None and str(name).strip()}
-    if not clean_names:
-        return {}
-
-    # Create mapping from clean name to original name (preserve original case)
-    name_mapping = {str(name).strip().upper(): str(name).strip() for name in names if name is not None}
-    unique_names = list(clean_names)
-
-    # Check existing names in one query (case-insensitive comparison)
-    params = ','.join(['?'] * len(unique_names))
-    cursor.execute(
-        f"SELECT id, UPPER(TRIM(name)) FROM {table} WHERE UPPER(TRIM(name)) IN ({params})", 
-        [name.upper() for name in unique_names]
-    )
-    existing = {name.upper(): id_ for id_, name in cursor.fetchall()}
-
-    # Find new names to insert (case-insensitive check)
-    new_names = [name for name in unique_names if name.upper() not in existing]
-
-    if new_names:
-        # Insert new names with original casing (but trimmed)
-        try:
-            cursor.executemany(
-                f"INSERT INTO {table} (name) VALUES (?)", 
-                [(name,) for name in new_names]
-            )
-            cursor.commit()
-            
-            # Get IDs for newly inserted names
-            cursor.execute(
-                f"SELECT id, UPPER(TRIM(name)) FROM {table} WHERE UPPER(TRIM(name)) IN ({params})", 
-                [name.upper() for name in new_names]
-            )
-            existing.update({name.upper(): id_ for id_, name in cursor.fetchall()})
-        except pyodbc.IntegrityError:
-            # If duplicate was inserted concurrently, refresh existing names
-            cursor.execute(
-                f"SELECT id, UPPER(TRIM(name)) FROM {table} WHERE UPPER(TRIM(name)) IN ({params})", 
-                [name.upper() for name in unique_names]
-            )
-            existing = {name.upper(): id_ for id_, name in cursor.fetchall()}
-        except pyodbc.Error as e:
-            print(f"⚠️ Error inserting {table} names: {e}")
-            conn.rollback()
-
-    # Return mapping from original names to IDs
-    return {name_mapping[k]: v for k, v in existing.items() if k in name_mapping}
-
-def enrich_with_foreign_keys(df, dept_ids, station_ids):
-    """Replace department/station names with their IDs using case-insensitive matching"""
-    df["department_id"] = df["department"].apply(
-        lambda x: dept_ids.get(str(x).strip(), None) if x is not None else None
-    )
-    df["service_station_id"] = df["service_station"].apply(
-        lambda x: station_ids.get(str(x).strip(), None) if x is not None else None
-    )
-    return df.drop(columns=["department", "service_station"])
+def normalize_name(name):
+    """Normalize a name by removing extra spaces and special characters."""
+    if pd.isna(name) or name is None:
+        return None
+    try:
+        str_name = str(name).strip()
+        str_name = re.sub(r'[^\w\s]', '', str_name)
+        str_name = re.sub(r'\s+', ' ', str_name)
+        return str_name.upper() if str_name else None
+    except Exception as e:
+        print(f"Error normalizing name '{name}': {e}")
+        return None
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(pyodbc.Error)
+    stop=stop_after_attempt(RETRY_ATTEMPTS),
+    wait=wait_exponential(multiplier=1, min=5, max=60),
+    retry=retry_if_exception_type((pyodbc.OperationalError, pyodbc.Error))
 )
-def insert_chunk(cursor, chunk, query):
-    """Insert a chunk of data with error handling and retries"""
-    try:
-        cursor.fast_executemany = True
-        cursor.executemany(query, chunk)
-        return len(chunk), 0
-    except pyodbc.Error as bulk_error:
-        print(f"⚠️ Bulk insert failed, falling back to row-by-row: {bulk_error}")
-        cursor.fast_executemany = False
-        success_count = 0
-        failed_rows = []
-        
-        for row in chunk:
-            try:
-                cursor.execute(query, row)
-                success_count += 1
-            except pyodbc.Error as row_error:
-                failed_rows.append((row, str(row_error)))
-        
-        if failed_rows:
-            print(f"❌ Failed to insert {len(failed_rows)} rows in chunk")
-            for row, error in failed_rows[:3]:  # Print first 3 errors to avoid flooding
-                print(f"Problematic row: {row}\nError: {error}")
-        
-        return success_count, len(failed_rows)
-
-def process_data():
-    start_time = time()
-    conn = None
-    cursor = None
-    total_failed = 0
+def get_or_create_name_ids_bulk(cursor, names, table, region_map=None):
+    if not names or all(name is None for name in names):
+        print(f"No {table} names provided or all are None")
+        return {}
     
+    name_mapping = {}
+    original_names = {}
+    for name in names:
+        if pd.isna(name) or name is None:
+            continue
+        norm_name = normalize_name(name)
+        if norm_name:
+            name_mapping[norm_name] = str(name).strip()
+            original_names[str(name).strip()] = norm_name
+    
+    if not name_mapping:
+        print(f"No valid {table} names after cleaning")
+        return {}
+    
+    print(f"Processing {len(name_mapping)} {table} names")
+    print(f"Sample names (original): {list(name_mapping.values())[:5]}")
+    print(f"Sample names (normalized): {list(name_mapping.keys())[:5]}")
+    
+    # Check existing records using original names
+    params = [name_mapping[norm_name] for norm_name in name_mapping]
+    placeholders = ','.join(['?'] * len(params))
+    existing = {}
+    if params:
+        try:
+            cursor.execute(
+                f"SELECT id, name FROM {table} WHERE name IN ({placeholders})",
+                params
+            )
+            existing = {name: id_ for id_, name in cursor.fetchall()}
+            print(f"Found {len(existing)} existing {table} records")
+        except pyodbc.Error as e:
+            print(f"Error checking existing {table} records: {e}")
+            raise
+    
+    new_names = [norm_name for norm_name in name_mapping if name_mapping[norm_name] not in existing]
+    print(f"Found {len(new_names)} new {table} names to insert: {[name_mapping[n] for n in new_names[:10]]}")
+    
+    if new_names:
+        for norm_name in new_names:
+            name = name_mapping.get(norm_name)
+            if not name:
+                print(f"⚠️ Skipping insertion for norm_name '{norm_name}' not found in name_mapping")
+                continue
+            try:
+                if table == "service_stations" and region_map:
+                    cursor.execute(
+                        f"INSERT INTO {table} (name, region) VALUES (?, ?)",
+                        name, region_map.get(name)
+                    )
+                else:
+                    cursor.execute(
+                        f"INSERT INTO {table} (name) VALUES (?)",
+                        name
+                    )
+                print(f"Successfully inserted: '{name}' into {table}")
+            except pyodbc.IntegrityError as e:
+                print(f"Duplicate detected for '{name}' in {table}: {e}")
+                continue
+            except pyodbc.Error as e:
+                print(f"❌ Failed to insert '{name}' into {table}: {e}")
+                raise
+    
+        cursor.connection.commit()
+    
+        # Re-fetch all names using original names
+        try:
+            cursor.execute(
+                f"SELECT id, name FROM {table} WHERE name IN ({placeholders})",
+                params
+            )
+            existing = {name: id_ for id_, name in cursor.fetchall()}
+            print(f"Retrieved IDs for {len(existing)} {table} records after insertion")
+        except pyodbc.Error as e:
+            print(f"Error retrieving {table} IDs after insertion: {e}")
+            raise
+    
+    result = {}
+    unmapped = []
+    for orig_name in original_names:
+        if orig_name in existing:
+            result[orig_name] = existing[orig_name]
+        else:
+            unmapped.append(orig_name)
+    
+    if unmapped:
+        print(f"⚠️ {len(unmapped)} unmapped {table} names: {unmapped[:10]}...")
+    
+    print(f"Returning {len(result)} {table} ID mappings")
+    return result
+
+def verify_database_state(cursor):
+    """Verify what's actually in the database"""
     try:
-        # Establish database connection
+        cursor.execute("SELECT COUNT(*) FROM departments")
+        dept_count = cursor.fetchone()[0]
+        print(f"Total departments in database: {dept_count}")
+        
+        cursor.execute("SELECT id, name, UPPER(TRIM(name)) as norm_name FROM departments")
+        dept_info = [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+        print(f"All departments (id, original, normalized): {dept_info}")
+        
+        cursor.execute("SELECT COUNT(*) FROM service_stations")
+        station_count = cursor.fetchone()[0]
+        print(f"Total service stations in database: {station_count}")
+        
+        cursor.execute("SELECT id, name, region FROM service_stations")
+        station_info = [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+        print(f"All service stations (id, name, region): {station_info}")
+    except Exception as e:
+        print(f"Error verifying database state: {e}")
+
+def insert_reference_data(df):
+    try:
         conn = connect_to_sql()
         cursor = conn.cursor()
-        print("✅ Successfully connected to SQL Server")
-
-        # Load and prepare data
-        print("⏳ Loading and preparing data...")
-        df = pd.read_excel("main.xlsx")
-        df = prepare_data(df)
         
-        # Create tables if they don't exist
         create_tables(cursor, conn)
         
-        # Process departments and stations in bulk
-        print("⏳ Processing departments and service stations...")
-        dept_ids = get_or_create_name_ids_bulk(cursor, df["department"].tolist(), "departments")
-        station_ids = get_or_create_name_ids_bulk(cursor, df["service_station"].tolist(), "service_stations")
+        region_map = dict(zip(
+            df['service_station'].str.strip(), 
+            df['region'].str.strip()
+        )) if 'region' in df.columns else None
         
-        # Replace names with foreign keys
-        df = enrich_with_foreign_keys(df, dept_ids, station_ids)
+        departments = df['department'].dropna().unique().tolist()
+        service_stations = df['service_station'].dropna().unique().tolist()
         
-        # Prepare insert query
-        insert_query = """
-        INSERT INTO fuel_transactions 
-        (date, time, vehicle_registration, department_id, truck_model, service_provider, 
-         service_station_id, product, quantity, full_tank_capacity, terminal_price, customer_amount, region)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
+        print(f"\nUnique departments to process ({len(departments)}): {departments}")
+        print(f"\nUnique service stations to process ({len(service_stations)}): {service_stations}")
         
-        # Convert to list of tuples for efficient insertion
-        data = [tuple(x) for x in df.to_numpy()]
-        total_rows = len(data)
-        inserted_rows = 0
+        print(f"\n⏳ Inserting {len(departments)} departments...")
+        dept_ids = get_or_create_name_ids_bulk(cursor, departments, "departments")
+        print(f"✅ Inserted {len(dept_ids)} departments")
+        print(f"Department ID mappings: {dept_ids}")
         
-        print(f"⏳ Starting bulk insert of {total_rows} rows in chunks of {CHUNK_SIZE}...")
+        print(f"\n⏳ Inserting {len(service_stations)} service stations...")
+        station_ids = get_or_create_name_ids_bulk(
+            cursor, 
+            service_stations, 
+            "service_stations",
+            region_map
+        )
+        print(f"✅ Inserted {len(station_ids)} service stations")
+        print(f"Service station ID mappings: {station_ids}")
         
-        # Process data in chunks
-        for i in range(0, total_rows, CHUNK_SIZE):
-            chunk = data[i:i+CHUNK_SIZE]
-            chunk_size = len(chunk)
-            
-            try:
-                # Insert chunk with retry logic
-                success_count, failed_count = insert_chunk(cursor, chunk, insert_query)
-                conn.commit()
-                inserted_rows += success_count
-                total_failed += failed_count
-                
-                progress = (i + min(CHUNK_SIZE, total_rows - i)) / total_rows * 100
-                print(f"✅ Inserted {i+1}-{i+success_count} ({success_count}/{chunk_size} rows) [{progress:.1f}%]")
-                
-                # Small delay to prevent server overload
-                sleep(0.2)
-                
-            except Exception as e:
-                conn.rollback()
-                print(f"❌ Chunk insert error: {e}")
-                # Try to reconnect if connection was lost
-                try:
-                    cursor.close()
-                    conn.close()
-                    conn = connect_to_sql()
-                    cursor = conn.cursor()
-                    print("✅ Reconnected to SQL Server")
-                except Exception as reconnect_error:
-                    print(f"❌ Failed to reconnect: {reconnect_error}")
-                    raise
+        print("\nVerifying database state:")
+        verify_database_state(cursor)
         
-        # Final statistics
-        elapsed = time() - start_time
-        rate = inserted_rows / elapsed if elapsed > 0 else 0
-        print(f"\n🎉 Successfully inserted {inserted_rows}/{total_rows} rows "
-              f"in {elapsed:.2f} seconds ({rate:.1f} rows/sec)")
-        print(f"💾 Storage efficiency: Departments: {len(dept_ids)}, Stations: {len(station_ids)}")
-        if total_failed > 0:
-            print(f"⚠️ Failed to insert {total_failed} rows ({(total_failed/total_rows)*100:.2f}%)")
-
+        return dept_ids, station_ids
+        
     except Exception as e:
-        print(f"❌ Critical error: {e}")
-        if conn:
-            conn.rollback()
+        print(f"❌ Error inserting reference data: {e}")
+        raise
     finally:
-        if cursor:
+        if 'cursor' in locals():
             cursor.close()
-        if conn:
+        if 'conn' in locals():
             conn.close()
-        print("✅ Database connection closed")
+        print("Reference data connection closed")
+
+def enrich_with_foreign_keys(df, dept_ids, station_ids):
+    df = df.copy()
+    
+    if "department" not in df.columns:
+        raise ValueError("Required column 'department' not found in DataFrame")
+    if "service_station" not in df.columns:
+        raise ValueError("Required column 'service_station' not found in DataFrame")
+    
+    # Debug: Print sample department and service station names
+    print(f"Sample department names in DataFrame: {df['department'].dropna().unique()[:5]}")
+    print(f"Sample service station names in DataFrame: {df['service_station'].dropna().unique()[:5]}")
+    print(f"Available department IDs: {dept_ids}")
+    print(f"Available service station IDs: {station_ids}")
+    
+    # Map department IDs using original names
+    df["department_id"] = df["department"].apply(
+        lambda x: dept_ids.get(str(x).strip() if pd.notna(x) else None, None)
+    )
+    unmapped_depts = df[df["department_id"].isna() & df["department"].notna()]["department"].unique()
+    if len(unmapped_depts) > 0:
+        print(f"⚠️ Warning: {len(unmapped_depts)} unmapped departments: {unmapped_depts[:10]}...")
+        for dept in unmapped_depts:
+            norm_dept = normalize_name(dept)
+            print(f"  - '{dept}' (normalized: '{norm_dept}')")
+        df["department_id"] = df["department_id"].fillna(-1).astype(int).replace(-1, None)
+    
+    # Map service station IDs using original names
+    df["service_station_id"] = df["service_station"].apply(
+        lambda x: station_ids.get(str(x).strip() if pd.notna(x) else None, None)
+    )
+    unmapped_stations = df[df["service_station_id"].isna() & df["service_station"].notna()]["service_station"].unique()
+    if len(unmapped_stations) > 0:
+        print(f"⚠️ Warning: {len(unmapped_stations)} unmapped service stations: {unmapped_stations[:10]}...")
+        for station in unmapped_stations:
+            norm_station = normalize_name(station)
+            print(f"  - '{station}' (normalized: '{norm_station}')")
+        df["service_station_id"] = df["service_station_id"].fillna(-1).astype(int).replace(-1, None)
+    
+    return df
+
+def insert_fuel_transactions(cursor, df):
+    insert_cols = [
+        'date', 'time', 'vehicle_registration', 'department_id', 'truck_model', 
+        'service_provider', 'service_station_id', 'product', 'quantity', 
+        'full_tank_capacity', 'terminal_price', 'customer_amount', 'region'
+    ]
+
+    placeholders = ','.join(['?'] * len(insert_cols))
+    insert_sql = f"""
+    INSERT INTO fuel_transactions ({', '.join(insert_cols)}) 
+    VALUES ({placeholders})
+    """
+
+    rows = []
+    for _, row in df.iterrows():
+        values = [row.get(col) if pd.notna(row.get(col)) else None for col in insert_cols]
+        rows.append(values)
+
+    for i in range(0, len(rows), CHUNK_SIZE):
+        chunk = rows[i:i+CHUNK_SIZE]
+        try:
+            cursor.executemany(insert_sql, chunk)
+            cursor.connection.commit()
+            print(f"Inserted chunk {i // CHUNK_SIZE + 1} with {len(chunk)} records")
+        except pyodbc.Error as e:
+            print(f"❌ Error inserting chunk {i // CHUNK_SIZE + 1}: {e}")
+            cursor.connection.rollback()
+            raise
+
+def insert_transaction_data(df, dept_ids, station_ids):
+    try:
+        conn = connect_to_sql()
+        cursor = conn.cursor()
+        
+        print("DataFrame columns before enrichment:", df.columns.tolist())
+        df_fk = enrich_with_foreign_keys(df, dept_ids, station_ids)
+        
+        insert_fuel_transactions(cursor, df_fk)
+        
+    except Exception as e:
+        print(f"❌ Error inserting transaction data: {e}")
+        raise
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
+        print("Transaction data connection closed")
+
+def main():
+    try:
+        df = pd.read_excel("main.xlsx")
+        print(f"Loaded {len(df)} rows")
+        print(f"Input DataFrame columns: {df.columns.tolist()}")
+    
+        print("\nPreparing data...")
+        df_clean = prepare_data(df)
+        print("✅ Data preparation completed")
+    
+        print("\nData Quality Check:")
+        print(f"Total rows: {len(df_clean)}")
+        if 'department' in df_clean.columns:
+            unique_depts = df_clean['department'].nunique()
+            print(f"Unique departments found: {unique_depts}")
+            print("Sample departments:", df_clean['department'].dropna().unique()[:10])
+        if 'service_station' in df_clean.columns:
+            unique_stations = df_clean['service_station'].nunique()
+            print(f"Unique service stations found: {unique_stations}")
+            print("Sample service stations:", df_clean['service_station'].dropna().unique()[:10])
+    
+        print("\n=== PHASE 1: Inserting Reference Data ===")
+        dept_ids, station_ids = insert_reference_data(df_clean)
+        
+        print("\n=== PHASE 2: Inserting Transaction Data ===")
+        insert_transaction_data(df_clean, dept_ids, station_ids)
+        
+        print("\n✅ All data inserted successfully!")
+    except Exception as e:
+        print(f"\n❌ Failed to complete data insertion: {e}")
+        raise
 
 if __name__ == "__main__":
-    process_data()
+    main()

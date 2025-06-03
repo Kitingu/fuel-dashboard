@@ -175,8 +175,9 @@ def generate_charts(df, chart_dir='static/charts'):
 
 @app.route('/', methods=['GET', 'POST'])
 def dashboard():
-    # Get current page from query params, default to 1
+    # Get current page and tab from query params or form data
     page = request.args.get('page', 1, type=int)
+    active_tab = request.values.get('tab', 'fuel')  # Default to 'fuel' tab
     
     filters = {
         'vehicle_reg': request.values.get('vehicle_reg', ''),
@@ -223,7 +224,8 @@ def dashboard():
             'per_page': ITEMS_PER_PAGE,
             'total': total,
             'total_pages': total_pages
-        }
+        },
+        active_tab=active_tab  # Pass active tab to template
     )
 
 @app.route('/export')

@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: fuel dashboard
+    env: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile

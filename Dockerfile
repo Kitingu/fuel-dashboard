@@ -1,33 +1,25 @@
 FROM python:3.11-slim
 
-# System dependencies
-RUN apt-get update && apt-get install -y \
-    gnupg2 \
-    curl \
-    unixodbc \
-    unixodbc-dev \
-    gcc \
-    g++ \
-    libssl-dev \
-    libffi-dev \
-    libpq-dev \
-    libjpeg-dev \
-    build-essential
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y g++ unixodbc-dev gnupg2 curl && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install Microsoft ODBC Driver 17 for SQL Server
-RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
-    && curl https://packages.microsoft.com/config/debian/10/prod.list > /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y msodbcsql17
+# Install Microsoft ODBC driver
+RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - && \
+    curl https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list && \
+    apt-get update && \
+    ACCEPT_EULA=Y apt-get install -y msodbcsql17 && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set workdir
+# Set working directory
 WORKDIR /app
 
-# Copy app code
-COPY . /app
+# Copy the application code into the container
+COPY . .
 
 # Install Python dependencies
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Start the app with gunicorn (adjust as needed)
-CMD ["gunicorn", "app:app"]
+# Command to run the application
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000"]

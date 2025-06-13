@@ -5,11 +5,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
-from sqlalchemy import create_engine, text
 from io import BytesIO
 from dotenv import load_dotenv
 from datetime import datetime
 from math import ceil
+from sqlalchemy import create_engine
+import pyodbc
 
 # Load environment variables
 load_dotenv()
@@ -28,7 +29,7 @@ engine = create_engine(DB_CONFIG)
 ITEMS_PER_PAGE = 20  # Number of items per page for pagination
 
 def get_dropdown_options():
-    """Fetch all dropdown options from database"""
+    """Fetch all dropdown options from the database"""
     with engine.connect() as conn:
         departments = pd.read_sql("SELECT id, name FROM departments ORDER BY name", conn)
         stations = pd.read_sql("SELECT id, name, region FROM service_stations ORDER BY name", conn)
@@ -63,33 +64,32 @@ def get_fuel_data(filters, page=1, per_page=ITEMS_PER_PAGE):
     WHERE 1=1
     """
     
-    params = {}
+    params = []
     conditions = []
     
     if filters.get('vehicle_reg'):
-        conditions.append("ft.vehicle_registration LIKE :vehicle_reg")
-        params['vehicle_reg'] = f"%{filters['vehicle_reg']}%"
+        conditions.append("ft.vehicle_registration LIKE %s")
+        params.append(f"%{filters['vehicle_reg']}%")
     
     if filters.get('department'):
-        conditions.append("d.id = :department_id")
-        params['department_id'] = filters['department']
+        conditions.append("d.id = %s")
+        params.append(filters['department'])
     
     if filters.get('service_station'):
-        conditions.append("s.id = :station_id")
-        params['station_id'] = filters['service_station']
+        conditions.append("s.id = %s")
+        params.append(filters['service_station'])
     
     if filters.get('region'):
-        conditions.append("s.region = :region")
-        params['region'] = filters['region']
+        conditions.append("s.region = %s")
+        params.append(filters['region'])
     
     if filters.get('product'):
-        conditions.append("ft.product = :product")
-        params['product'] = filters['product']
+        conditions.append("ft.product = %s")
+        params.append(filters['product'])
     
     if filters.get('start_date') and filters.get('end_date'):
-        conditions.append("ft.date BETWEEN :start_date AND :end_date")
-        params['start_date'] = filters['start_date']
-        params['end_date'] = filters['end_date']
+        conditions.append("ft.date BETWEEN %s AND %s")
+        params.extend([filters['start_date'], filters['end_date']])
     
     if conditions:
         base_query += " AND " + " AND ".join(conditions)
@@ -97,14 +97,14 @@ def get_fuel_data(filters, page=1, per_page=ITEMS_PER_PAGE):
     
     # Get total count for pagination
     with engine.connect() as conn:
-        total = pd.read_sql(text(count_query), conn, params=params).iloc[0]['total']
+        total = pd.read_sql(count_query, conn, params=params).iloc[0]['total']
     
     # Add pagination
     base_query += " ORDER BY ft.date DESC"
     base_query += f" OFFSET {(page-1)*per_page} ROWS FETCH NEXT {per_page} ROWS ONLY"
     
     with engine.connect() as conn:
-        df = pd.read_sql(text(base_query), conn, params=params)
+        df = pd.read_sql(base_query, conn, params=params)
     
     return df, total
 
@@ -178,9 +178,7 @@ def generate_charts(df, chart_dir='static/charts'):
 
 @app.route('/', methods=['GET', 'POST'])
 def dashboard():
-    # Get current page and tab from query params or form data
     page = request.args.get('page', 1, type=int)
-    active_tab = request.values.get('tab', 'fuel')  # Default to 'fuel' tab
     
     filters = {
         'vehicle_reg': request.values.get('vehicle_reg', ''),
@@ -192,12 +190,7 @@ def dashboard():
         'end_date': request.values.get('end_date', '')
     }
     
-    # Reset filters if empty form submitted
-    if request.method == 'POST' and not any(filters.values()):
-        filters = {k: '' for k in filters}
-        page = 1  # Reset to first page when clearing filters
-    
-    # Get data and options
+    # Get filtered data
     df, total = get_fuel_data(filters, page)
     options = get_dropdown_options()
     
@@ -206,15 +199,19 @@ def dashboard():
         'transactions': "{:,}".format(total),
         'total_quantity': f"{df['quantity'].sum():,.2f} L" if not df.empty else "0.00 L",
         'total_revenue': f"KES {df['customer_amount'].sum():,.2f}" if not df.empty else "KES 0.00",
-        'avg_price': f"KES {df['terminal_price'].mean():,.2f}/L" if not df.empty else "KES 0.00/L"
     }
     
-    # Generate charts if data exists
     charts = generate_charts(df) if not df.empty else None
-    
+
     # Calculate pagination
     total_pages = ceil(total / ITEMS_PER_PAGE)
-    
+    pagination = {
+        'page': page,
+        'per_page': ITEMS_PER_PAGE,
+        'total': total,
+        'total_pages': total_pages
+    }
+
     return render_template(
         'dashboard.html',
         data=df.to_dict('records'),
@@ -222,13 +219,7 @@ def dashboard():
         options=options,
         summary=summary,
         charts=charts,
-        pagination={
-            'page': page,
-            'per_page': ITEMS_PER_PAGE,
-            'total': total,
-            'total_pages': total_pages
-        },
-        active_tab=active_tab  # Pass active tab to template
+        pagination=pagination  # Pass pagination to template
     )
 
 @app.route('/export')
@@ -243,7 +234,7 @@ def export_data():
         'end_date': request.args.get('end_date')
     }
     
-    # Get all data without pagination for export
+    # Get all data for export
     df, _ = get_fuel_data(filters, page=1, per_page=1000000)
     output = BytesIO()
     
